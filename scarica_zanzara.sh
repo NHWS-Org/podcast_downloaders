@@ -105,12 +105,32 @@ log_progress() {
   [[ -t 1 ]] || return 0
 
   local message=$1
-  local timestamp
-  timestamp="$("$DATE_CMD" '+%Y-%m-%d %H:%M:%S%z')"
-  printf '\r\033[K%b[RUN  ]%b %s controllate=%s scaricate=%s presenti=%s assenti=%s errori=%s da_scaricare=%s | %s' \
-    "$CLR_BLUE" "$CLR_RESET" "$timestamp" \
-    "$checked_count" "$downloaded_count" "$existing_count" \
-    "$missing_count" "$failed_count" "$planned_count" "$message"
+  local columns=""
+  local max_width
+  local prefix
+  local progress
+
+  if command -v tput >/dev/null 2>&1; then
+    columns="$(tput cols 2>/dev/null || true)"
+  fi
+  if [[ ! "$columns" =~ ^[0-9]+$ ]] || [[ "$columns" -le 0 ]]; then
+    if [[ "${COLUMNS:-}" =~ ^[0-9]+$ ]] && [[ "$COLUMNS" -gt 0 ]]; then
+      columns=$COLUMNS
+    else
+      columns=80
+    fi
+  fi
+
+  max_width=$((columns - 1))
+  (( max_width > 0 )) || max_width=1
+  prefix="[RUN] $checked_count chk D:$downloaded_count OK:$existing_count M:$missing_count E:$failed_count P:$planned_count | "
+  if (( ${#prefix} >= max_width )); then
+    progress="${prefix:0:max_width}"
+  else
+    progress="$prefix${message:0:max_width-${#prefix}}"
+  fi
+
+  printf '\r\033[K%s' "$progress"
   progress_active=1
 }
 
@@ -283,13 +303,13 @@ SCAN_START_DATE="$START_DATE"
 if [[ -n "$last_downloaded_date" ]]; then
   resume_date="$("$DATE_CMD" -d "$last_downloaded_date +1 day" +%F)"
   if [[ "$REPAIR_GAPS" -eq 1 && "$START_DATE" < "$last_downloaded_date" ]]; then
-    log_info "Ultimo episodio già scaricato: $last_downloaded_date; controllo le lacune da $START_DATE."
+    log_info "Ultimo $last_downloaded_date; controllo lacune da $START_DATE"
   else
     SCAN_START_DATE="$resume_date"
-    log_info "Ultimo episodio già scaricato: $last_downloaded_date; riparto da $SCAN_START_DATE."
+    log_info "Ultimo $last_downloaded_date; ripartenza da $SCAN_START_DATE"
   fi
 else
-  log_info "Nessun episodio già scaricato trovato; uso la data iniziale $START_DATE."
+  log_info "Nessun episodio presente; inizio da $START_DATE"
 fi
 
 # Riprende dal feed RSS per le puntate recenti; prima del limite dell'indice
@@ -314,16 +334,16 @@ download_episode() {
 
   if [ -s "$file_path" ]; then
     existing_count=$((existing_count + 1))
-    log_ok "Già presente: La Zanzara - ${yyyymmdd}.mp3 — salto. ($file_path)"
+    log_progress "Gia presente $yyyymmdd"
     return
   fi
 
-  log_info "Scarico La Zanzara - ${yyyymmdd}.mp3"
+  log_info "Download $yyyymmdd"
   run_cmd rm -f "$tmp_path"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     planned_count=$((planned_count + 1))
-    log_progress "Simulerei download della puntata $yyyymmdd"
+    log_progress "dry-run $yyyymmdd"
     return
   fi
 
@@ -342,7 +362,7 @@ download_episode() {
     run_cmd rm -f "$tmp_path"
     if [ "$exit_code" -eq 8 ]; then
       missing_count=$((missing_count + 1))
-      log_progress "Puntata assente: $yyyymmdd"
+      log_progress "assente $yyyymmdd"
     else
       failed_count=$((failed_count + 1))
       log_error "Errore ($exit_code) su La Zanzara - ${yyyymmdd}.mp3 — continuo."
@@ -350,7 +370,7 @@ download_episode() {
   elif [ ! -s "$tmp_path" ]; then
     run_cmd rm -f "$tmp_path"
     missing_count=$((missing_count + 1))
-    log_progress "Puntata assente: $yyyymmdd"
+    log_progress "assente $yyyymmdd"
   else
     run_cmd mv -f "$tmp_path" "$file_path"
     downloaded_count=$((downloaded_count + 1))
@@ -466,7 +486,7 @@ fi
 
 oldest_index_date="$(head -n 1 "$index_sorted" | cut -f 1)"
 today="$("$DATE_CMD" +%F)"
-log_info "Indice RSS disponibile dal $oldest_index_date; controllo da $SCAN_START_DATE a oggi in $OUT_DIR."
+log_info "RSS dal $oldest_index_date; controllo da $SCAN_START_DATE"
 
 if [[ "$REPAIR_GAPS" -eq 1 && -n "$last_downloaded_date" \
   && "$SCAN_START_DATE" < "$last_downloaded_date" ]]; then
