@@ -11,7 +11,7 @@ che il feed non conferma.
 Per scaricare l'ultima versione:
 
 ```sh
-wget -O scarica_zanzara_new.sh https://raw.githubusercontent.com/NHWS-Org/podcast_downloaders/refs/heads/main/scarica_zanzara.sh
+wget -O scarica_zanzara.sh https://raw.githubusercontent.com/NHWS-Org/podcast_downloaders/refs/heads/main/scarica_zanzara.sh
 chmod +x scarica_zanzara.sh
 ```
 
