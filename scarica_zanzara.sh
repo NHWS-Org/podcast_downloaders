@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Scarica gli MP3 de "La Zanzara" dal giorno successivo all'ultimo già presente
 # (o da START_DATE se non ne trova), usando prima il feed RSS ufficiale.
-# Salta sabati,domeniche e festività mobili (es. Pasquetta) se non usa il feed RSS.
+# Mantiene un archivio delle puntate note per evitare tentativi storici ripetuti.
 # Requisiti: bash + awk + GNU date + wget
 
 set -euo pipefail
@@ -13,6 +13,7 @@ SHOW_SLUG="lazanzara"
 #START_DATE="2016-01-05" # Data originale di inizio dei podcast sul sito di radio24
 START_DATE="2026-01-01" # Data iniziale usata se non trova episodi già scaricati
 OUT_DIR="/mnt/user/Multimedia/Podcasts/La Zanzara" # Impostare path corretto
+HISTORY_FILE="${OUT_DIR}/zanzara_feed_history.tsv"
 WAIT_SECONDS=1
 USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
 
@@ -24,17 +25,18 @@ REPAIR_GAPS=0 # 1 = cerca anche le puntate mancanti prima dell'ultima presente
 checked_count=0
 downloaded_count=0
 existing_count=0
-missing_count=0
+unavailable_count=0
 failed_count=0
 planned_count=0
 progress_active=0
+active_year=""
 
 usage() {
   cat <<'EOF'
 Uso: scarica_zanzara.sh [--dry-run|-n] [--debug|-d] [--repair-gaps]
   --dry-run, -n   Simula le azioni sui file; scarica comunque il feed RSS
   --debug,   -d   Modalità verbosa (bash trace + wget non silenzioso)
-  --repair-gaps   Cerca anche puntate mancanti tra START_DATE e l'ultima presente
+  --repair-gaps   Ricontrolla tutte le date da START_DATE a oggi, anno per anno
 EOF
 }
 
@@ -125,7 +127,7 @@ log_progress() {
 
   max_width=$((columns - 1))
   (( max_width > 0 )) || max_width=1
-  prefix="[RUN] $checked_count chk D:$downloaded_count OK:$existing_count M:$missing_count E:$failed_count P:$planned_count | "
+  prefix="[RUN${active_year:+ $active_year}] $checked_count chk D:$downloaded_count OK:$existing_count ND:$unavailable_count E:$failed_count P:$planned_count | "
   if (( ${#prefix} >= max_width )); then
     progress="${prefix:0:max_width}"
   else
@@ -182,57 +184,6 @@ if [[ "$DEBUG" -eq 1 ]]; then
   WGET_QUIET_OPT=""
 fi
 
-# Festività a data mobile (Italia): al momento gestiamo Pasquetta (Lunedì dell'Angelo)
-# Nota: Pasqua cade sempre di domenica, quindi è già saltata dal check weekend.
-# Se vuoi aggiungere altre date mobili, vedi la funzione `is_movable_holiday`.
-
-# Il loop delle date è cronologico: una cache scalare evita array associativi,
-# non disponibili nella versione di Bash inclusa in macOS.
-EASTER_CACHE_YEAR=""
-EASTER_CACHE=""
-EASTER_MONDAY_CACHE=""
-
-# Calcola la data di Pasqua (calendario gregoriano) nel formato YYYY-MM-DD
-# Algoritmo: Anonymous Gregorian algorithm
-calc_easter() {
-  local y=$1
-  local a=$(( y % 19 ))
-  local b=$(( y / 100 ))
-  local c=$(( y % 100 ))
-  local d=$(( b / 4 ))
-  local e=$(( b % 4 ))
-  local f=$(( (b + 8) / 25 ))
-  local g=$(( (b - f + 1) / 3 ))
-  local h=$(( (19*a + b - d - g + 15) % 30 ))
-  local i=$(( c / 4 ))
-  local k=$(( c % 4 ))
-  local l=$(( (32 + 2*e + 2*i - h - k) % 7 ))
-  local m=$(( (a + 11*h + 22*l) / 451 ))
-  local month=$(( (h + l - 7*m + 114) / 31 ))
-  local day=$(( ((h + l - 7*m + 114) % 31) + 1 ))
-  printf "%04d-%02d-%02d" "$y" "$month" "$day"
-}
-
-# Ritorna 0 (true) se la data YYYY-MM-DD è una festività mobile da saltare
-is_movable_holiday() {
-  local yyyymmdd=$1
-  local yyyy=${yyyymmdd:0:4}
-
-  # Pasqua (domenica) è già coperta dal weekend, ma calcoliamola per Pasquetta
-  if [[ "$EASTER_CACHE_YEAR" != "$yyyy" ]]; then
-    EASTER_CACHE_YEAR="$yyyy"
-    EASTER_CACHE="$(calc_easter "$yyyy")"
-    EASTER_MONDAY_CACHE="$("$DATE_CMD" -d "$EASTER_CACHE +1 day" +%F)"
-  fi
-
-  # Pasquetta (Lunedì dell'Angelo)
-  if [[ "$yyyymmdd" == "$EASTER_MONDAY_CACHE" ]]; then
-    return 0
-  fi
-
-  return 1
-}
-
 # === Controlli preliminari ===
 command -v wget >/dev/null || { log_error "wget non trovato."; exit 1; }
 if ! normalized_start_date="$("$DATE_CMD" -d "$START_DATE" +%F 2>/dev/null)" \
@@ -246,77 +197,68 @@ if [[ "$DRY_RUN" -eq 0 && ! -w "$OUT_DIR" ]]; then
   exit 1
 fi
 
-# --- Weekend o festivo? ---
-is_skip_day() {
-  local dow=$1
-  local yyyymmdd=$2
+feed_tmp="$(mktemp)"
+index_raw="$(mktemp)"
+index_tsv="$(mktemp)"
+index_sorted="$(mktemp)"
+local_episodes="$(mktemp)"
+old_history="$(mktemp)"
+history_sorted="$(mktemp)"
+history_updates="$(mktemp)"
+history_merged="$(mktemp)"
+history_stage=""
+trap 'rm -f "$feed_tmp" "$index_raw" "$index_tsv" "$index_sorted" "$local_episodes" "$old_history" "$history_sorted" "$history_updates" "$history_merged"; [[ -z "$history_stage" ]] || rm -f "$history_stage"' EXIT
 
-  # Weekend (GNU date: 1=lun ... 7=dom)
-  if (( dow >= 6 )); then
-    return 0
-  fi
-
-  # Festivi a data fissa (formato: MM-DD)
-  # 01-01 Capodanno
-  # 01-06 Epifania
-  # 04-25 Festa della Liberazione
-  # 05-01 Festa dei Lavoratori
-  # 06-02 Festa della Repubblica
-  # 08-15 Ferragosto
-  # 11-01 Ognissanti
-  # 12-08 Immacolata Concezione
-  # 12-25 Natale
-  # 12-26 Santo Stefano
-  local md="${yyyymmdd:5:2}-${yyyymmdd:8:2}"
-
-  case "$md" in
-    01-01|01-06|04-25|05-01|06-02|08-15|11-01|12-08|12-25|12-26)
-      return 0
-      ;;
-  esac
-
-  # Festività a data mobile (es. Pasquetta)
-  if is_movable_holiday "$yyyymmdd"; then
-    return 0
-  fi
-
-  return 1
-}
-
-# Riprende dal giorno successivo all'ultimo episodio scaricato; se non ne trova,
-# usa START_DATE come data iniziale.
-last_downloaded_date=""
-log_info "Scansione episodi locali..."
-if [[ -d "$OUT_DIR" ]]; then
-  while IFS= read -r -d '' downloaded_file; do
-    [[ -s "$downloaded_file" ]] || continue
+# Registra le puntate presenti nei file locali e trova la data dell'ultima.
+scan_local_directory() {
+  local directory=$1
+  local downloaded_file file_name downloaded_date year yymmdd
+  [[ -d "$directory" ]] || return 0
+  for downloaded_file in "$directory"/La\ Zanzara\ -\ ????-??-??.mp3; do
+    [[ -f "$downloaded_file" && -s "$downloaded_file" ]] || continue
     file_name="${downloaded_file##*/}"
     downloaded_date="${file_name#La Zanzara - }"
     downloaded_date="${downloaded_date%.mp3}"
 
     if [[ "$downloaded_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
-      && [[ "$("$DATE_CMD" -d "$downloaded_date" +%F 2>/dev/null || true)" == "$downloaded_date" ]] \
-      && [[ -z "$last_downloaded_date" || "$downloaded_date" > "$last_downloaded_date" ]]; then
-      last_downloaded_date="$downloaded_date"
+      && [[ "$("$DATE_CMD" -d "$downloaded_date" +%F 2>/dev/null || true)" == "$downloaded_date" ]]; then
+      year="${downloaded_date:0:4}"
+      yymmdd="${downloaded_date:2:2}${downloaded_date:5:2}${downloaded_date:8:2}"
+      printf '%s\t%s/%s/%s-%s.mp3\t1\n' \
+        "$downloaded_date" "$BASE_URL" "$year" "$yymmdd" "$SHOW_SLUG" >> "$local_episodes"
+      if [[ -z "$last_downloaded_date" || "$downloaded_date" > "$last_downloaded_date" ]]; then
+        last_downloaded_date="$downloaded_date"
+      fi
     fi
-  done < <(find "$OUT_DIR" -type f -name 'La Zanzara - ????-??-??.mp3' -print0)
-fi
+  done
+}
 
+last_downloaded_date=""
 SCAN_START_DATE="$START_DATE"
-if [[ -n "$last_downloaded_date" ]]; then
-  resume_date="$("$DATE_CMD" -d "$last_downloaded_date +1 day" +%F)"
-  if [[ "$REPAIR_GAPS" -eq 1 && "$START_DATE" < "$last_downloaded_date" ]]; then
-    log_info "Ultimo $last_downloaded_date; controllo lacune da $START_DATE"
-  else
-    SCAN_START_DATE="$resume_date"
-    log_info "Ultimo $last_downloaded_date; ripartenza da $SCAN_START_DATE"
-  fi
-else
-  log_info "Nessun episodio presente; inizio da $START_DATE"
+log_info "Scansione episodi locali..."
+scan_local_directory "$OUT_DIR"
+if [[ -d "$OUT_DIR" ]]; then
+  for year_directory in "$OUT_DIR"/[0-9][0-9][0-9][0-9]; do
+    [[ -d "$year_directory" ]] || continue
+    directory_year="${year_directory##*/}"
+    [[ "$directory_year" =~ ^[0-9]{4}$ ]] || continue
+    if [[ "$REPAIR_GAPS" -eq 0 ]]; then
+      log_info "Ricerca ultimo episodio: $directory_year"
+    fi
+    scan_local_directory "$year_directory"
+  done
 fi
 
-# Riprende dal feed RSS per le puntate recenti; prima del limite dell'indice
-# mantiene la ricerca giornaliera, così non si perdono puntate più vecchie.
+if [[ "$REPAIR_GAPS" -eq 0 ]]; then
+  if [[ -n "$last_downloaded_date" ]]; then
+    SCAN_START_DATE="$("$DATE_CMD" -d "$last_downloaded_date +1 day" +%F)"
+    log_info "Ultimo $last_downloaded_date; ripartenza da $SCAN_START_DATE"
+  else
+    log_info "Nessun episodio presente; inizio da $START_DATE"
+  fi
+fi
+
+# Scarica episodi noti dal feed corrente o dall'archivio storico.
 download_episode() {
   local yyyymmdd=$1
   local url=$2
@@ -364,28 +306,26 @@ download_episode() {
   if [ "$exit_code" -ne 0 ]; then
     run_cmd rm -f "$tmp_path"
     if [ "$exit_code" -eq 8 ]; then
-      missing_count=$((missing_count + 1))
-      log_progress "assente $yyyymmdd"
+      unavailable_count=$((unavailable_count + 1))
+      log_progress "non disponibile $yyyymmdd"
     else
       failed_count=$((failed_count + 1))
       log_error "Errore ($exit_code) su La Zanzara - ${yyyymmdd}.mp3 — continuo."
     fi
   elif [ ! -s "$tmp_path" ]; then
     run_cmd rm -f "$tmp_path"
-    missing_count=$((missing_count + 1))
-    log_progress "assente $yyyymmdd"
+    unavailable_count=$((unavailable_count + 1))
+    log_progress "non disponibile $yyyymmdd"
   else
     run_cmd mv -f "$tmp_path" "$file_path"
     downloaded_count=$((downloaded_count + 1))
+    if ! printf '%s\t%s\t1\n' "$yyyymmdd" "$url" >> "$history_updates"; then
+      log_error "Impossibile registrare La Zanzara - ${yyyymmdd}.mp3 nell'archivio temporaneo."
+      exit 1
+    fi
     log_ok "OK: La Zanzara - ${yyyymmdd}.mp3"
   fi
 }
-
-feed_tmp="$(mktemp)"
-index_raw="$(mktemp)"
-index_tsv="$(mktemp)"
-index_sorted="$(mktemp)"
-trap 'rm -f "$feed_tmp" "$index_raw" "$index_tsv" "$index_sorted"' EXIT
 
 log_info "Scarico indice RSS"
 # shellcheck disable=SC2086
@@ -487,78 +427,160 @@ if ! sort -t $'\t' -k1,1 "$index_tsv" > "$index_sorted"; then
   exit 1
 fi
 
+if [[ -f "$HISTORY_FILE" ]]; then
+  if ! awk -F '\t' '
+    NF != 3 || $1 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ \
+      || $2 !~ /^https:\/\/podcast-radio24\.ilsole24ore\.com\/radio24_audio\// \
+      || $3 !~ /^[01]$/ { exit 1 }
+  ' "$HISTORY_FILE"; then
+    log_error "Archivio storico non valido: $HISTORY_FILE"
+    exit 1
+  fi
+  while IFS=$'\t' read -r history_date history_url history_downloaded; do
+    if ! normalized_history_date="$("$DATE_CMD" -d "$history_date" +%F 2>/dev/null)" \
+      || [[ "$normalized_history_date" != "$history_date" ]]; then
+      log_error "Data non valida nell'archivio storico: $history_date"
+      exit 1
+    fi
+  done < "$HISTORY_FILE"
+  if ! cp "$HISTORY_FILE" "$old_history"; then
+    log_error "Impossibile leggere l'archivio storico: $HISTORY_FILE"
+    exit 1
+  fi
+fi
+
+if ! awk -F '\t' '
+  FILENAME == ARGV[1] {
+    if ($3 == "1") {
+      old_url[$1] = $2
+      downloaded[$1] = 1
+    }
+    next
+  }
+  FILENAME == ARGV[2] {
+    local_url[$1] = $2
+    downloaded[$1] = 1
+    next
+  }
+  FILENAME == ARGV[3] {
+    current_url[$1] = $2
+    next
+  }
+  END {
+    for (date in current_url) {
+      status = (date in downloaded) ? 1 : 0
+      print date "\t" current_url[date] "\t" status
+    }
+    for (date in downloaded) {
+      if (!(date in current_url)) {
+        url = (date in local_url) ? local_url[date] : old_url[date]
+        print date "\t" url "\t1"
+      }
+    }
+  }
+' "$old_history" "$local_episodes" "$index_sorted" | sort -t $'\t' -k1,1 > "$history_sorted"; then
+  log_error "Impossibile aggiornare l'archivio storico."
+  exit 1
+fi
+
+persist_history() {
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+
+  history_stage="$(mktemp "${OUT_DIR}/.zanzara-history.XXXXXX")"
+  if ! cp "$history_sorted" "$history_stage"; then
+    log_error "Impossibile preparare l'archivio storico: $HISTORY_FILE"
+    return 1
+  fi
+  if ! mv -f "$history_stage" "$HISTORY_FILE"; then
+    log_error "Impossibile salvare l'archivio storico: $HISTORY_FILE"
+    return 1
+  fi
+  history_stage=""
+}
+
+if ! persist_history; then
+  exit 1
+fi
+
 oldest_index_date="$(head -n 1 "$index_sorted" | cut -f 1)"
 today="$("$DATE_CMD" +%F)"
 log_info "RSS dal $oldest_index_date; controllo da $SCAN_START_DATE"
 
-if [[ "$REPAIR_GAPS" -eq 1 && -n "$last_downloaded_date" \
-  && "$SCAN_START_DATE" < "$last_downloaded_date" ]]; then
-  repair_date="$SCAN_START_DATE"
-  while [[ "$repair_date" < "$last_downloaded_date" || "$repair_date" == "$last_downloaded_date" ]]; do
-    indexed_url="$(awk -F '\t' -v target="$repair_date" '$1 == target { print $2; exit }' "$index_sorted")"
-    if [[ -n "$indexed_url" ]]; then
-      download_episode "$repair_date" "$indexed_url"
-    else
-      repair_dow="$("$DATE_CMD" -d "$repair_date" +%u)"
-      if is_skip_day "$repair_dow" "$repair_date"; then
-        checked_count=$((checked_count + 1))
-        log_info "Salto (no programma): $repair_date"
-      else
-        repair_year="${repair_date:0:4}"
-        repair_yymmdd="$("$DATE_CMD" -d "$repair_date" +%y%m%d)"
-        repair_url="${BASE_URL}/${repair_year}/${repair_yymmdd}-${SHOW_SLUG}.mp3"
-        download_episode "$repair_date" "$repair_url"
-      fi
-    fi
-    repair_date="$("$DATE_CMD" -d "$repair_date +1 day" +%F)"
-  done
-fi
+total_checked=0
+total_downloaded=0
+total_existing=0
+total_unavailable=0
+total_failed=0
+total_planned=0
 
-fallback_start_date="$SCAN_START_DATE"
-if [[ "$REPAIR_GAPS" -eq 1 && -n "$last_downloaded_date" \
-  && "$SCAN_START_DATE" < "$last_downloaded_date" ]]; then
-  fallback_start_date="$resume_date"
-fi
+year_cursor="${SCAN_START_DATE:0:4}"
+last_scan_year="${today:0:4}"
+while [[ "$year_cursor" -le "$last_scan_year" ]]; do
+  active_year="$year_cursor"
+  checked_count=0
+  downloaded_count=0
+  existing_count=0
+  unavailable_count=0
+  failed_count=0
+  planned_count=0
 
-if [[ "$fallback_start_date" < "$oldest_index_date" ]]; then
-  fallback_end="$("$DATE_CMD" -d "$oldest_index_date -1 day" +%F)"
-  fallback_date="$fallback_start_date"
+  log_progress "Scansione cartella $active_year..."
 
-  while [[ "$fallback_date" < "$fallback_end" || "$fallback_date" == "$fallback_end" ]]; do
-    yyyy="${fallback_date:0:4}"
-    yymmdd="$("$DATE_CMD" -d "$fallback_date" +%y%m%d)"
-    yyyymmdd="$fallback_date"
-    dow="$("$DATE_CMD" -d "$fallback_date" +%u)"  # 1..7 (lun..dom)
+  while IFS=$'\t' read -r episode_date episode_url episode_downloaded; do
+    [[ "${episode_date:0:4}" == "$active_year" ]] || continue
+    [[ "$episode_date" < "$SCAN_START_DATE" ]] && continue
+    [[ "$episode_date" > "$today" ]] && continue
+    download_episode "$episode_date" "$episode_url"
+  done < "$history_sorted"
 
-    if is_skip_day "$dow" "$yyyymmdd"; then
-      checked_count=$((checked_count + 1))
-      log_info "Salto (no programma): $yyyymmdd"
-    else
-      url="${BASE_URL}/${yyyy}/${yymmdd}-${SHOW_SLUG}.mp3"
-      download_episode "$yyyymmdd" "$url"
-    fi
-    fallback_date="$("$DATE_CMD" -d "$fallback_date +1 day" +%F)"
-  done
-fi
+  log_summary "Anno $active_year: controllate=$checked_count, scaricate=$downloaded_count, presenti=$existing_count, non_disponibili=$unavailable_count, errori=$failed_count, da_scaricare=$planned_count."
+  total_checked=$((total_checked + checked_count))
+  total_downloaded=$((total_downloaded + downloaded_count))
+  total_existing=$((total_existing + existing_count))
+  total_unavailable=$((total_unavailable + unavailable_count))
+  total_failed=$((total_failed + failed_count))
+  total_planned=$((total_planned + planned_count))
 
-while IFS=$'\t' read -r yyyymmdd url; do
-  if [[ "$yyyymmdd" < "$SCAN_START_DATE" || "$yyyymmdd" > "$today" ]]; then
-    continue
+  if [[ "$year_cursor" == "$last_scan_year" ]]; then
+    break
   fi
-  if [[ "$REPAIR_GAPS" -eq 1 && -n "$last_downloaded_date" \
-    && "$SCAN_START_DATE" < "$last_downloaded_date" \
-    && ( "$yyyymmdd" < "$last_downloaded_date" || "$yyyymmdd" == "$last_downloaded_date" ) ]]; then
-    continue
-  fi
-  download_episode "$yyyymmdd" "$url"
-done < "$index_sorted"
+  year_cursor="$("$DATE_CMD" -d "$active_year-12-31 +1 day" +%Y)"
+done
 
-summary="Riepilogo: controllate=$checked_count, scaricate=$downloaded_count, presenti=$existing_count, assenti=$missing_count, errori=$failed_count, da_scaricare=$planned_count"
+if [[ -s "$history_updates" ]]; then
+  if ! awk -F '\t' '
+    FILENAME == ARGV[1] {
+      urls[$1] = $2
+      status[$1] = $3
+      next
+    }
+    FILENAME == ARGV[2] {
+      urls[$1] = $2
+      status[$1] = "1"
+      next
+    }
+    END {
+      for (date in urls) {
+        print date "\t" urls[date] "\t" status[date]
+      }
+    }
+  ' "$history_sorted" "$history_updates" | sort -t $'\t' -k1,1 > "$history_merged"; then
+    log_error "Impossibile aggiornare le puntate scaricate nell'archivio storico."
+    exit 1
+  fi
+  mv -f "$history_merged" "$history_sorted"
+  if ! persist_history; then
+    exit 1
+  fi
+fi
+
+active_year=""
+summary="Riepilogo totale: controllate=$total_checked, scaricate=$total_downloaded, presenti=$total_existing, non_disponibili=$total_unavailable, errori=$total_failed, da_scaricare=$total_planned"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log_summary "$summary. Simulazione completata (il feed RSS è stato scaricato)."
-elif [[ "$failed_count" -gt 0 ]]; then
+elif [[ "$total_failed" -gt 0 ]]; then
   log_summary "$summary."
-  log_error "Completato con $failed_count errore/i di download."
+  log_error "Completato con $total_failed errore/i di download."
   exit 1
 else
   log_summary "$summary. Fatto."
