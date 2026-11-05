@@ -6,6 +6,20 @@
 mantiene un archivio locale per non ritentare ogni giorno puntate storiche
 che il feed non conferma.
 
+### Download dello script
+
+Per scaricare la versione del branch `improve-zanzara-download-and-logs` con un
+nome diverso, senza sovrascrivere `scarica_zanzara.sh`:
+
+```sh
+wget -O scarica_zanzara_new.sh https://raw.githubusercontent.com/napalmz/podcast_downloaders/improve-zanzara-download-and-logs/scarica_zanzara.sh
+chmod +x scarica_zanzara_new.sh
+```
+
+`-O` specifica il nome del file di destinazione: se esiste gia, viene
+sovrascritto. Configurare quindi `OUT_DIR` e `START_DATE` nel file scaricato
+prima di eseguirlo.
+
 ### Requisiti
 
 - Bash (anche la versione 3 fornita da macOS)
