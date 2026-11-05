@@ -64,6 +64,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+printf '[INFO ] Avvio: verifica requisiti e ricerca episodi locali...\n'
+
 # === Colori log ===
 if [[ -t 1 && -t 2 ]]; then
   CLR_RESET=$'\033[0m'
@@ -152,8 +154,6 @@ run_cmd() {
     return "$exit_code"
   fi
 }
-
-log_info "Avvio: verifica requisiti"
 
 # Trace bash in debug
 if [[ "$DEBUG" -eq 1 ]]; then
