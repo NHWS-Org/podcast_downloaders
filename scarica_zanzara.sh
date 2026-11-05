@@ -10,8 +10,8 @@ set -euo pipefail
 BASE_URL="https://podcast-radio24.ilsole24ore.com/radio24_audio"
 FEED_URL="https://www.radio24.ilsole24ore.com/podcast/lazanzara.xml"
 SHOW_SLUG="lazanzara"
-#START_DATE="2016-01-05" # Data originale di inizio dei podcast sul sito di radio24
-START_DATE="2026-01-01" # Data iniziale usata se non trova episodi già scaricati
+START_DATE="2016-01-05" # Data originale di inizio dei podcast sul sito di radio24
+#START_DATE="2026-01-01" # Data iniziale usata se non trova episodi già scaricati
 OUT_DIR="/mnt/user/Multimedia/Podcasts/La Zanzara" # Impostare path corretto
 HISTORY_FILE="${OUT_DIR}/zanzara_feed_history.tsv"
 WAIT_SECONDS=1
@@ -100,7 +100,7 @@ log_line() {
 
 finish_progress() {
   if [[ "$progress_active" -eq 1 ]]; then
-    printf '\n'
+    printf '\r\033[K'
     progress_active=0
   fi
 }

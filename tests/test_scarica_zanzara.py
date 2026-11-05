@@ -251,9 +251,13 @@ class DownloaderTests(unittest.TestCase):
                 process.wait(timeout=5)
         text = output.decode()
         frames = re.findall(r"\r\033\[K([^\r\n]*)", text)
-        self.assertTrue(any(frame.startswith("[RUN 2025]") for frame in frames))
-        self.assertTrue(any(frame.startswith("[RUN 2026]") for frame in frames))
-        self.assertTrue(all(len(frame) <= 79 for frame in frames))
+        progress_frames = [frame for frame in frames if frame.startswith("[RUN")]
+        self.assertTrue(any(frame.startswith("[RUN 2025]") for frame in progress_frames))
+        self.assertTrue(any(frame.startswith("[RUN 2026]") for frame in progress_frames))
+        self.assertTrue(all(len(frame) <= 79 for frame in progress_frames))
+        plain_text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        self.assertRegex(plain_text, r"\r\x1b\[K\[INFO \].*Anno 2025:")
+        self.assertRegex(plain_text, r"\r\x1b\[K\[INFO \].*Anno 2026:")
         self.assertLess(text.index("Anno 2025:"), text.index("[RUN 2026]"))
         self.assertIn("[RUN 2026] 0 chk D:0 OK:0 ND:0 E:0 P:0", text)
 
