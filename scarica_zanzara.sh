@@ -21,6 +21,14 @@ DRY_RUN=0   # 1 = non scarica episodi/non cancella/non sposta, mostra cosa fareb
 DEBUG=0     # 1 = output più verboso + trace
 REPAIR_GAPS=0 # 1 = cerca anche le puntate mancanti prima dell'ultima presente
 
+checked_count=0
+downloaded_count=0
+existing_count=0
+missing_count=0
+failed_count=0
+planned_count=0
+progress_active=0
+
 usage() {
   cat <<'EOF'
 Uso: scarica_zanzara.sh [--dry-run|-n] [--debug|-d] [--repair-gaps]
@@ -73,7 +81,7 @@ else
   CLR_PURPLE=""
 fi
 
-log() {
+log_line() {
   local level=$1
   local color=$2
   local message=$3
@@ -86,16 +94,35 @@ log() {
   fi
 }
 
-log_info()   { log INFO "$CLR_BLUE" "$*"; }
-log_ok()     { log OK "$CLR_GREEN" "$*"; }
-log_warn()   { log WARN "$CLR_YELLOW" "$*"; }
-log_error()  { log ERR "$CLR_RED" "$*"; }
-log_dry()    { log DRY "$CLR_PURPLE" "$*"; }
+finish_progress() {
+  if [[ "$progress_active" -eq 1 ]]; then
+    printf '\n'
+    progress_active=0
+  fi
+}
+
+log_progress() {
+  [[ -t 1 ]] || return 0
+
+  local message=$1
+  local timestamp
+  timestamp="$("$DATE_CMD" '+%Y-%m-%d %H:%M:%S%z')"
+  printf '\r\033[K%b[RUN  ]%b %s controllate=%s scaricate=%s presenti=%s assenti=%s errori=%s da_scaricare=%s | %s' \
+    "$CLR_BLUE" "$CLR_RESET" "$timestamp" \
+    "$checked_count" "$downloaded_count" "$existing_count" \
+    "$missing_count" "$failed_count" "$planned_count" "$message"
+  progress_active=1
+}
+
+log_info()   { log_progress "$*"; }
+log_ok()     { log_progress "$*"; }
+log_warn()  { finish_progress; log_line WARN "$CLR_YELLOW" "$*"; }
+log_error() { finish_progress; log_line ERR "$CLR_RED" "$*"; }
+log_summary() { finish_progress; log_line INFO "$CLR_BLUE" "$*"; }
 
 run_cmd() {
   # Wrapper per supportare dry-run
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log_dry "$*"
     return 0
   fi
   local exit_code=0
@@ -267,11 +294,6 @@ fi
 
 # Riprende dal feed RSS per le puntate recenti; prima del limite dell'indice
 # mantiene la ricerca giornaliera, così non si perdono puntate più vecchie.
-downloaded_count=0
-existing_count=0
-missing_count=0
-failed_count=0
-planned_count=0
 download_episode() {
   local yyyymmdd=$1
   local url=$2
@@ -281,6 +303,8 @@ download_episode() {
   local tmp_path="${file_path}.tmp"
   local exit_code=0
 
+  checked_count=$((checked_count + 1))
+  log_progress "Controllo puntata $yyyymmdd"
   run_cmd mkdir -p "$year_dir"
 
   if [ -f "$file_path" ] && [ ! -s "$file_path" ]; then
@@ -294,13 +318,12 @@ download_episode() {
     return
   fi
 
-  log_info "Provo: La Zanzara - ${yyyymmdd}.mp3 - $url"
+  log_info "Scarico La Zanzara - ${yyyymmdd}.mp3"
   run_cmd rm -f "$tmp_path"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log_dry "wget $url -> $tmp_path"
-    log_dry "(poi validerei size>0 e farei mv su $file_path)"
     planned_count=$((planned_count + 1))
+    log_progress "Simulerei download della puntata $yyyymmdd"
     return
   fi
 
@@ -318,20 +341,20 @@ download_episode() {
   if [ "$exit_code" -ne 0 ]; then
     run_cmd rm -f "$tmp_path"
     if [ "$exit_code" -eq 8 ]; then
-      log_warn "Assente (wget exit 8): La Zanzara - ${yyyymmdd}.mp3"
       missing_count=$((missing_count + 1))
+      log_progress "Puntata assente: $yyyymmdd"
     else
-      log_error "Errore ($exit_code) su La Zanzara - ${yyyymmdd}.mp3 — continuo."
       failed_count=$((failed_count + 1))
+      log_error "Errore ($exit_code) su La Zanzara - ${yyyymmdd}.mp3 — continuo."
     fi
   elif [ ! -s "$tmp_path" ]; then
-    log_warn "Assente (scaricato 0 byte): La Zanzara - ${yyyymmdd}.mp3"
     run_cmd rm -f "$tmp_path"
     missing_count=$((missing_count + 1))
+    log_progress "Puntata assente: $yyyymmdd"
   else
     run_cmd mv -f "$tmp_path" "$file_path"
-    log_ok "OK: La Zanzara - ${yyyymmdd}.mp3"
     downloaded_count=$((downloaded_count + 1))
+    log_ok "OK: La Zanzara - ${yyyymmdd}.mp3"
   fi
 }
 
@@ -341,7 +364,7 @@ index_tsv="$(mktemp)"
 index_sorted="$(mktemp)"
 trap 'rm -f "$feed_tmp" "$index_raw" "$index_tsv" "$index_sorted"' EXIT
 
-log_info "Scarico l'indice RSS: $FEED_URL"
+log_info "Scarico indice RSS"
 # shellcheck disable=SC2086
 if ! wget \
   ${WGET_QUIET_OPT} \
@@ -455,6 +478,7 @@ if [[ "$REPAIR_GAPS" -eq 1 && -n "$last_downloaded_date" \
     else
       repair_dow="$("$DATE_CMD" -d "$repair_date" +%u)"
       if is_skip_day "$repair_dow" "$repair_date"; then
+        checked_count=$((checked_count + 1))
         log_info "Salto (no programma): $repair_date"
       else
         repair_year="${repair_date:0:4}"
@@ -484,6 +508,7 @@ if [[ "$fallback_start_date" < "$oldest_index_date" ]]; then
     dow="$("$DATE_CMD" -d "$fallback_date" +%u)"  # 1..7 (lun..dom)
 
     if is_skip_day "$dow" "$yyyymmdd"; then
+      checked_count=$((checked_count + 1))
       log_info "Salto (no programma): $yyyymmdd"
     else
       url="${BASE_URL}/${yyyy}/${yymmdd}-${SHOW_SLUG}.mp3"
@@ -505,12 +530,13 @@ while IFS=$'\t' read -r yyyymmdd url; do
   download_episode "$yyyymmdd" "$url"
 done < "$index_sorted"
 
-log_info "Riepilogo: scaricate=$downloaded_count, presenti=$existing_count, assenti=$missing_count, errori=$failed_count, da_scaricare=$planned_count."
+summary="Riepilogo: controllate=$checked_count, scaricate=$downloaded_count, presenti=$existing_count, assenti=$missing_count, errori=$failed_count, da_scaricare=$planned_count"
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  log_ok "Simulazione completata (il feed RSS è stato scaricato)."
+  log_summary "$summary. Simulazione completata (il feed RSS è stato scaricato)."
 elif [[ "$failed_count" -gt 0 ]]; then
+  log_summary "$summary."
   log_error "Completato con $failed_count errore/i di download."
   exit 1
 else
-  log_ok "Fatto."
+  log_summary "$summary. Fatto."
 fi

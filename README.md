@@ -25,7 +25,11 @@ Impostare `OUT_DIR` e `START_DATE` all'inizio dello script prima di eseguirlo.
 - `--repair-gaps` ricontrolla le date da `START_DATE` fino all'ultimo episodio
   già presente, per recuperare eventuali puntate mancanti nell'intervallo.
 
-I log includono data e ora. Gli errori e gli avvisi vanno su `stderr`; il
-riepilogo finale riporta gli episodi scaricati, già presenti, assenti e falliti.
+In un terminale, il progresso aggiorna una sola riga con l'episodio corrente
+e i contatori cumulativi; a fine esecuzione viene stampato un riepilogo.
+Con l'output rediretto, le righe di progresso non vengono emesse. Errori e
+avvisi restano messaggi dettagliati su `stderr`.
+I log includono data e ora. Il riepilogo riporta gli episodi esaminati,
+scaricati, già presenti, assenti e falliti.
 Il programma termina con codice diverso da zero se fallisce un download per un
 errore diverso da un episodio non disponibile.
