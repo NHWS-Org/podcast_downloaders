@@ -80,9 +80,9 @@ log() {
   local timestamp
   timestamp="$("$DATE_CMD" '+%Y-%m-%d %H:%M:%S%z')"
   if [[ "$level" == "WARN" || "$level" == "ERR" ]]; then
-    printf '%b[%s]%b %s %s\n' "$color" "$level" "$CLR_RESET" "$timestamp" "$message" >&2
+    printf '%b[%-5s]%b %s %s\n' "$color" "$level" "$CLR_RESET" "$timestamp" "$message" >&2
   else
-    printf '%b[%s]%b %s %s\n' "$color" "$level" "$CLR_RESET" "$timestamp" "$message"
+    printf '%b[%-5s]%b %s %s\n' "$color" "$level" "$CLR_RESET" "$timestamp" "$message"
   fi
 }
 
