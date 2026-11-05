@@ -8,7 +8,7 @@ e, per le date anteriori alla copertura del feed, prova gli URL giornalieri.
 ### Requisiti
 
 - Bash (anche la versione 3 fornita da macOS)
-- Python 3.6 o successivo, per leggere il feed XML
+- `awk`, per leggere il feed RSS senza dipendenze Python
 - GNU `date` (`date` su Linux; `gdate` su macOS, installabile con GNU coreutils)
 - `wget`
 

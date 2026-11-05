@@ -2,7 +2,7 @@
 # Scarica gli MP3 de "La Zanzara" dal giorno successivo all'ultimo già presente
 # (o da START_DATE se non ne trova), usando prima il feed RSS ufficiale.
 # Salta sabati,domeniche e festività mobili (es. Pasquetta) se non usa il feed RSS.
-# Requisiti: bash + Python 3 + GNU date + wget
+# Requisiti: bash + awk + GNU date + wget
 
 set -euo pipefail
 
@@ -186,7 +186,6 @@ is_movable_holiday() {
 
 # === Controlli preliminari ===
 command -v wget >/dev/null || { log_error "wget non trovato."; exit 1; }
-command -v python3 >/dev/null || { log_error "Python 3 non trovato."; exit 1; }
 if ! normalized_start_date="$("$DATE_CMD" -d "$START_DATE" +%F 2>/dev/null)" \
   || [[ "$normalized_start_date" != "$START_DATE" ]]; then
   log_error "START_DATE non valida (formato richiesto YYYY-MM-DD): $START_DATE"
@@ -355,50 +354,81 @@ if ! wget \
   exit 1
 fi
 
-if ! python3 - "$feed_tmp" > "$index_raw" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
+if ! awk '
+  {
+    xml = xml $0 "\n"
+  }
+  END {
+    if (xml !~ /<rss([[:space:]>])/ || xml !~ /<\/rss[[:space:]]*>/) {
+      exit 1
+    }
 
-try:
-    root = ET.parse(sys.argv[1]).getroot()
-    local_name = lambda element: element.tag.rsplit("}", 1)[-1]
-    child_named = lambda element, name: next(
-        (child for child in element if local_name(child) == name), None
-    )
-    if local_name(root) != "rss":
-        raise ValueError("elemento radice diverso da <rss>")
-    channel = child_named(root, "channel")
-    items = [item for item in channel if local_name(item) == "item"] if channel is not None else []
-    if not items:
-        raise ValueError("nessun elemento <item>")
-    for item in items:
-        pub_date_element = child_named(item, "pubDate")
-        pub_date = pub_date_element.text if pub_date_element is not None else None
-        enclosure = child_named(item, "enclosure")
-        media_url = enclosure.get("url") if enclosure is not None else None
-        if not pub_date or not media_url:
-            raise ValueError("un elemento <item> non contiene pubDate o enclosure")
-        if any(char in media_url for char in "\t\r\n"):
-            raise ValueError("URL enclosure con caratteri di controllo")
-        published = parsedate_to_datetime(pub_date).astimezone()
-        print(published.strftime("%Y-%m-%d") + "\t" + media_url)
-except (ET.ParseError, OSError, TypeError, ValueError) as error:
-    print("Errore parsing RSS: {}".format(error), file=sys.stderr)
-    sys.exit(1)
-PY
+    while (match(xml, /<item([[:space:]][^>]*)?>/)) {
+      item_count++
+      xml = substr(xml, RSTART + RLENGTH)
+      if (!match(xml, /<\/item[[:space:]]*>/)) {
+        exit 1
+      }
+
+      item = substr(xml, 1, RSTART - 1)
+      xml = substr(xml, RSTART + RLENGTH)
+
+      if (!match(item, /<pubDate[[:space:]]*>/)) {
+        exit 1
+      }
+      item = substr(item, RSTART + RLENGTH)
+      if (!match(item, /<\/pubDate[[:space:]]*>/)) {
+        exit 1
+      }
+      pub_date = substr(item, 1, RSTART - 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", pub_date)
+      if (pub_date == "") {
+        exit 1
+      }
+
+      if (!match(item, /<enclosure[[:space:]][^>]*>/)) {
+        exit 1
+      }
+      enclosure = substr(item, RSTART, RLENGTH)
+      if (match(enclosure, /[[:space:]]url[[:space:]]*=[[:space:]]*"/)) {
+        enclosure = substr(enclosure, RSTART + RLENGTH)
+        if (!match(enclosure, /"/)) {
+          exit 1
+        }
+      } else if (match(enclosure, /[[:space:]]url[[:space:]]*=[[:space:]]*\047/)) {
+        enclosure = substr(enclosure, RSTART + RLENGTH)
+        if (!match(enclosure, /\047/)) {
+          exit 1
+        }
+      } else {
+        exit 1
+      }
+      media_url = substr(enclosure, 1, RSTART - 1)
+      if (media_url == "" || media_url ~ /[[:space:]]/) {
+        exit 1
+      }
+
+      print pub_date "\t" media_url
+      parsed_count++
+    }
+
+    if (item_count == 0 || parsed_count != item_count) {
+      exit 1
+    }
+  }
+' "$feed_tmp" > "$index_raw"
 then
-  log_error "Impossibile leggere un feed RSS completo e valido."
+  log_error "Impossibile leggere un feed RSS completo e valido con awk."
   exit 1
 fi
 
 while IFS=$'\t' read -r published_at media_url; do
-  if ! published_date="$("$DATE_CMD" -d "$published_at" +%F 2>/dev/null)" \
-    || [[ "$published_date" != "$published_at" ]]; then
+  if ! published_date="$("$DATE_CMD" -d "$published_at" +%F 2>/dev/null)"; then
     log_error "Data non valida nell'indice RSS: $published_at"
     exit 1
   fi
 
+  media_url="${media_url//&amp;/&}"
   if [[ "$media_url" != https://podcast-radio24.ilsole24ore.com/radio24_audio/* ]]; then
     log_error "URL MP3 non valido nell'indice RSS: $media_url"
     exit 1
