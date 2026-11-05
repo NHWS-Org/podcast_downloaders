@@ -27,6 +27,7 @@ Impostare `OUT_DIR` e `START_DATE` all'inizio dello script prima di eseguirlo.
 
 In un terminale, il progresso aggiorna una sola riga con l'episodio corrente
 e i contatori cumulativi; a fine esecuzione viene stampato un riepilogo.
+Lo stato compare gia all'avvio, anche durante la scansione degli episodi locali.
 Con l'output rediretto, le righe di progresso non vengono emesse. Errori e
 avvisi restano messaggi dettagliati su `stderr`.
 I log includono data e ora. Il riepilogo riporta gli episodi esaminati,

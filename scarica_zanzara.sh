@@ -153,6 +153,8 @@ run_cmd() {
   fi
 }
 
+log_info "Avvio: verifica requisiti"
+
 # Trace bash in debug
 if [[ "$DEBUG" -eq 1 ]]; then
   set -x
@@ -284,6 +286,7 @@ is_skip_day() {
 # Riprende dal giorno successivo all'ultimo episodio scaricato; se non ne trova,
 # usa START_DATE come data iniziale.
 last_downloaded_date=""
+log_info "Scansione episodi locali..."
 if [[ -d "$OUT_DIR" ]]; then
   while IFS= read -r -d '' downloaded_file; do
     [[ -s "$downloaded_file" ]] || continue
