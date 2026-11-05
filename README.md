@@ -8,12 +8,11 @@ che il feed non conferma.
 
 ### Download dello script
 
-Per scaricare la versione del branch `improve-zanzara-download-and-logs` con un
-nome diverso, senza sovrascrivere `scarica_zanzara.sh`:
+Per scaricare l'ultima versione:
 
 ```sh
-wget -O scarica_zanzara_new.sh https://raw.githubusercontent.com/napalmz/podcast_downloaders/improve-zanzara-download-and-logs/scarica_zanzara.sh
-chmod +x scarica_zanzara_new.sh
+wget -O scarica_zanzara_new.sh https://raw.githubusercontent.com/NHWS-Org/podcast_downloaders/refs/heads/main/scarica_zanzara.sh
+chmod +x scarica_zanzara.sh
 ```
 
 `-O` specifica il nome del file di destinazione: se esiste gia, viene
